@@ -1,21 +1,83 @@
 import React, { useState, useRef, useEffect } from 'react';
 import './ScreenRecorder.css';
+import RecordRTC from 'recordrtc';
+
+const peerConnection = new RTCPeerConnection(/* Configuration */);
+
+const getRemoteAudioStream = async (peerConnection) => {
+  return new Promise((resolve, reject) => {
+    peerConnection.ontrack = (event) => {
+      const remoteStream = event.streams[0];
+      if (remoteStream) {
+        resolve(remoteStream);
+      } else {
+        reject(new Error('No remote stream found'));
+      }
+    };
+    setTimeout(() => {
+      reject(new Error('Timeout: No remote stream received'));
+    }, 5000);
+  });
+};
 
 const ScreenRecorder = () => {
   const [isRecording, setIsRecording] = useState(false);
-  const [recordedBlobs, setRecordedBlobs] = useState([]);
   const [isAutoRecording, setIsAutoRecording] = useState(false);
+  const [recordedBlobs, setRecordedBlobs] = useState([]);
   const mediaRecorderRef = useRef(null);
-  const streamRef = useRef(null);
   const autoRecordIntervalRef = useRef(null);
   const chunksRef = useRef([]);
+  const [callRecorder, setCallRecorder] = useState(null);
 
+  // Start call recording
+  const startCallRecording = async () => {
+    try {
+      const remoteStream = await getRemoteAudioStream(peerConnection);
+      console.log('Remote stream acquired:', remoteStream);
+
+      const localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      console.log('Local stream acquired:', localStream);
+
+      const combinedStream = new MediaStream([
+        ...localStream.getAudioTracks(),
+        ...remoteStream.getAudioTracks()
+      ]);
+
+      console.log('Combined stream:', combinedStream);
+
+      const recorder = new RecordRTC(combinedStream, { type: 'audio' });
+      recorder.startRecording();
+      setCallRecorder(recorder);
+      console.log('Call recording started.');
+    } catch (error) {
+      console.error('Error starting call recording:', error);
+      alert('Failed to start call recording. Please grant permissions and try again.');
+    }
+  };
+
+  // Stop call recording
+  const stopCallRecording = () => {
+    if (callRecorder) {
+      callRecorder.stopRecording(() => {
+        const callBlob = callRecorder.getBlob();
+        if (callBlob) {
+          console.log('Call recording stopped. Blob created.');
+          setRecordedBlobs(prevBlobs => [...prevBlobs, callBlob]);
+          setCallRecorder(null); // Clear callRecorder after stopping
+        } else {
+          console.error('Failed to get call recording Blob');
+        }
+      });
+    } else {
+      console.error('No call recording to stop');
+    }
+  };
+
+  // Start screen recording
   const startRecording = async (isAuto = false) => {
     try {
-      // Get screen and audio streams
       let screenStream;
       if (isAuto) {
-        // For auto recording, capture the current tab without prompting
         screenStream = await navigator.mediaDevices.getDisplayMedia({
           video: {
             displaySurface: 'browser',
@@ -23,62 +85,42 @@ const ScreenRecorder = () => {
             cursor: 'never'
           },
           audio: true,
-          preferCurrentTab: true // This is a proposed feature, might not work in all browsers
+          preferCurrentTab: true
         });
       } else {
-        // For manual recording, use the original options
-        const displayMediaOptions = {
-          video: {
-            mediaSource: "window",
-            cursor: "never"
-          },
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            sampleRate: 44100
-          }
-        };
-        screenStream = await navigator.mediaDevices.getDisplayMedia(displayMediaOptions);
+        screenStream = await navigator.mediaDevices.getDisplayMedia({
+          video: true,
+          audio: true,
+        });
       }
+      console.log('Screen stream acquired:', screenStream);
 
-      // Create separate audio stream for local audio
       const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      console.log('Audio stream acquired:', audioStream);
 
-      // Set up RTCPeerConnection for handling remote audio
-      const peerConnection = new RTCPeerConnection();
-
-      // Add audio track from remote peer to the combined stream
-      peerConnection.ontrack = (event) => {
-        if (event.streams && event.streams[0]) {
-          event.streams[0].getAudioTracks().forEach(track => {
-            streamRef.current.addTrack(track); // Add remote audio track to combined stream
-          });
-        }
-      };
-
-      // Combine video and local audio into one stream
-      streamRef.current = new MediaStream([
+      const combinedStream = new MediaStream([
         ...screenStream.getVideoTracks(),
         ...audioStream.getAudioTracks()
       ]);
 
-      // Start recording with MediaRecorder
-      const mediaRecorder = new MediaRecorder(streamRef.current, { mimeType: 'video/webm;codecs=vp9,opus' });
+      const mediaRecorder = new RecordRTC(combinedStream, { type: 'video' });
+      mediaRecorder.startRecording();
       mediaRecorderRef.current = mediaRecorder;
 
       mediaRecorder.ondataavailable = (event) => {
         if (event.data && event.data.size > 0) {
           chunksRef.current.push(event.data);
+          console.log('Data available:', event.data);
         }
       };
 
       mediaRecorder.onstop = () => {
         const blob = new Blob(chunksRef.current, { type: 'video/webm' });
+        console.log('Screen recording stopped. Blob created.');
         setRecordedBlobs(prevBlobs => [...prevBlobs, blob]);
         chunksRef.current = [];
       };
 
-      mediaRecorder.start(1000); // Collect data every second
       setIsRecording(true);
     } catch (error) {
       console.error('Error starting screen recording:', error);
@@ -86,17 +128,28 @@ const ScreenRecorder = () => {
     }
   };
 
+  // Stop screen recording
   const stopRecording = () => {
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-      mediaRecorderRef.current.stop();
+    if (mediaRecorderRef.current) {
+      mediaRecorderRef.current.stopRecording(() => {
+        const blob = mediaRecorderRef.current.getBlob();
+        if (blob) {
+          console.log('Screen recording stopped. Blob created.');
+          setRecordedBlobs(prevBlobs => [...prevBlobs, blob]);
+        } else {
+          console.error('Failed to get screen recording Blob');
+        }
+      });
       setIsRecording(false);
     }
   };
 
+  // Toggle auto recording
   const toggleAutoRecording = () => {
     setIsAutoRecording(prev => !prev);
   };
 
+  // Handle auto recording intervals
   useEffect(() => {
     if (isAutoRecording) {
       startRecording(true);
@@ -111,30 +164,38 @@ const ScreenRecorder = () => {
 
     return () => {
       clearInterval(autoRecordIntervalRef.current);
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach(track => track.stop());
-      }
     };
   }, [isAutoRecording]);
 
+  // Download recording
   const downloadRecording = (blob, index) => {
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    document.body.appendChild(a);
-    a.style = 'display: none';
-    a.href = url;
-    a.download = `screen-recording-${index + 1}.webm`;
-    a.click();
-    URL.revokeObjectURL(url);
+    if (blob) {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      document.body.appendChild(a);
+      a.style.display = 'none';
+      a.href = url;
+      a.download = `recording-${index + 1}.webm`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } else {
+      console.error('Blob is not available for download');
+    }
   };
 
   return (
     <div className="screen-recorder-container">
-      <h2>Screen Recorder</h2>
+      <h2>Screen & Audio Recorder</h2>
       {!isRecording ? (
-        <button onClick={() => startRecording(false)}>Start Manual Recording</button>
+        <>
+          <button onClick={() => startRecording(false)}>Start Manual Recording</button>
+          <button onClick={startCallRecording}>Start Call Recording</button>
+        </>
       ) : (
-        <button onClick={stopRecording}>Stop Manual Recording</button>
+        <>
+          <button onClick={stopRecording}>Stop Manual Recording</button>
+          <button onClick={stopCallRecording}>Stop Call Recording</button>
+        </>
       )}
       <button onClick={toggleAutoRecording}>
         {isAutoRecording ? 'Stop Auto Recording' : 'Start Auto Recording'}
@@ -144,12 +205,7 @@ const ScreenRecorder = () => {
           <h3>Recording Previews:</h3>
           {recordedBlobs.map((blob, index) => (
             <div key={index} className="recording-preview">
-              <video
-                src={URL.createObjectURL(blob)}
-                controls
-                width="640"
-                height="480"
-              />
+              <video src={URL.createObjectURL(blob)} controls width="640" height="480" />
               <br />
               <button onClick={() => downloadRecording(blob, index)}>
                 Download Recording {index + 1}
